@@ -19,37 +19,37 @@ import os
 import sys
 import json
 import warnings
+import numpy as np
+from pathlib import Path
+from dotenv import load_dotenv
+
 warnings.filterwarnings("ignore")   # suppress RAGAS deprecation warnings
 
-from pathlib import Path
-
 # ── 1. Imports ───────────────────────────────────────────────────────────────
-# TODO: import RAGAS evaluate + dataset classes
-# from ragas import evaluate, EvaluationDataset, SingleTurnSample
+load_dotenv()
 
-# TODO: import the 4 metric instances (NOT from ragas.metrics.collections)
-# from ragas.metrics import (
-#     faithfulness,
-#     answer_relevancy,
-#     context_recall,
-#     context_precision,
-# )
+# Map .env keys to LangChain environment variables
+os.environ["LANGCHAIN_TRACING_V2"]  = os.getenv("LANGSMITH_TRACING", "true")
+os.environ["LANGCHAIN_API_KEY"]     = os.getenv("LANGSMITH_API_KEY", "")
+os.environ["LANGCHAIN_PROJECT"]     = os.getenv("LANGSMITH_PROJECT", "Day22")
+os.environ["LANGCHAIN_ENDPOINT"]    = os.getenv("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
 
-# TODO: import LangChain components (same as steps 1 & 2)
-# from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-# from langchain_core.prompts import ChatPromptTemplate
-# from langchain_core.output_parsers import StrOutputParser
-# from langchain_community.vectorstores import FAISS
-# from langchain_text_splitters import RecursiveCharacterTextSplitter
-# from langsmith import traceable
+from ragas import evaluate, EvaluationDataset, SingleTurnSample
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_recall,
+    context_precision,
+)
 
-# TODO: import numpy for averaging
-# import numpy as np
-
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langsmith import traceable
 
 # ── 2. QA pairs with ground-truth answers ───────────────────────────────────
-# Each entry has a "question" and a "reference" (ground-truth answer).
-# You need BOTH to compute context_recall.
 QA_PAIRS = [
     {"question": "What are the three main types of machine learning?",
      "reference": "The three main types of machine learning are supervised learning, unsupervised learning, and reinforcement learning."},
@@ -153,143 +153,145 @@ QA_PAIRS = [
      "reference": "Hallucination, toxicity, bias, PII leakage, and jailbreaking attacks."},
 ]
 
+# ── 3. Prompt templates ──────────────────────────────────────────────────
+SYSTEM_V1 = (
+    "You are a highly accurate AI assistant. "
+    "Your task is to answer the user's question using ONLY the provided context. "
+    "Do not use any outside knowledge. "
+    "Every sentence in your response must be directly supported by the context. "
+    "If the context does not contain the answer, explicitly state: 'I don't have enough information.'\n\n"
+    "Context:\n{context}"
+)
+PROMPT_V1 = ChatPromptTemplate.from_messages([("system", SYSTEM_V1), ("human", "{question}")])
 
-# ── 3. Prompt templates (same as step 2) ────────────────────────────────────
-# TODO: define PROMPT_V1 and PROMPT_V2 (copy from step 2)
-# SYSTEM_V1 = "..."
-# PROMPT_V1 = ChatPromptTemplate.from_messages([("system", SYSTEM_V1), ("human", "{question}")])
-
-# SYSTEM_V2 = "..."
-# PROMPT_V2 = ChatPromptTemplate.from_messages([("system", SYSTEM_V2), ("human", "{question}")])
+SYSTEM_V2 = (
+    "You are an expert AI tutor. Your goal is to provide a structured, accurate answer grounded solely in the context.\n\n"
+    "Instructions:\n"
+    "1. Read the provided context thoroughly.\n"
+    "2. Answer the question using ONLY information from the context.\n"
+    "3. Use a clear, technical, and well-organized format.\n"
+    "4. If the context does not provide sufficient information, state that you don't know based on the documents.\n\n"
+    "Context:\n{context}"
+)
+PROMPT_V2 = ChatPromptTemplate.from_messages([("system", SYSTEM_V2), ("human", "{question}")])
 
 PROMPTS = {
-    "v1": None,   # TODO: replace None with PROMPT_V1
-    "v2": None,   # TODO: replace None with PROMPT_V2
+    "v1": PROMPT_V1,
+    "v2": PROMPT_V2,
 }
 
-
-# ── 4. Build vectorstore (reuse logic from step 1) ───────────────────────────
+# ── 4. Build vectorstore ────────────────────────────────────────────────────
 def build_vectorstore():
-    # TODO: copy from step 1
-    pass
-
+    kb_path = Path("data/knowledge_base.txt")
+    if not kb_path.exists():
+        print(f"❌ Error: {kb_path} not found. Run Step 1 first.")
+        sys.exit(1)
+        
+    text = kb_path.read_text()
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = splitter.split_text(text)
+    
+    embeddings = OpenAIEmbeddings(
+        model=os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small"),
+        api_key=os.getenv("OPENAI_API_KEY", ""),
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    )
+    
+    vectorstore = FAISS.from_texts(chunks, embeddings)
+    return vectorstore
 
 # ── 5. Run RAG and capture outputs + contexts ────────────────────────────────
-# TODO: optionally add @traceable decorator
 def run_rag(retriever, llm, prompt, question: str) -> dict:
     """
     Run the RAG chain for one question.
-
-    IMPORTANT: return contexts as a LIST of strings, not a joined string!
-    RAGAS needs individual passage strings to compute context_recall.
-
-    Returns: {"answer": str, "contexts": list[str]}
     """
-    # TODO: retrieve documents
-    # docs     = retriever.invoke(question)
-    # contexts = [doc.page_content for doc in docs]   # ← list of strings!
-    # ctx_str  = "\n\n".join(contexts)
+    docs     = retriever.invoke(question)
+    contexts = [doc.page_content for doc in docs]
+    ctx_str  = "\n\n".join(contexts)
 
-    # TODO: run the chain
-    # answer = (prompt | llm | StrOutputParser()).invoke({"context": ctx_str, "question": question})
+    answer = (prompt | llm | StrOutputParser()).invoke({"context": ctx_str, "question": question})
 
-    # TODO: return both answer and contexts list
-    # return {"answer": answer, "contexts": contexts}
-
-    pass  # remove this line when done
-
+    return {"answer": answer, "contexts": contexts}
 
 def collect_rag_outputs(vectorstore, prompt_version: str) -> list:
     """
     Run all 50 QA pairs through the given prompt version.
-    Returns a list of dicts with keys: question, reference, answer, contexts.
     """
-    # TODO: create retriever, llm, and select the right prompt
-    # retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-    # llm       = ChatOpenAI(...)
-    # prompt    = PROMPTS[prompt_version]
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    llm = ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        api_key=os.getenv("OPENAI_API_KEY", ""),
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    )
+    prompt = PROMPTS[prompt_version]
 
     results = []
-    print(f"\nRunning 50 questions with prompt {prompt_version} ...")
+    print(f"\n🚀 Running {len(QA_PAIRS)} questions with prompt {prompt_version} ...")
 
     for i, qa in enumerate(QA_PAIRS, 1):
-        # TODO: call run_rag() and collect results
-        # out = run_rag(retriever, llm, prompt, qa["question"])
-        # results.append({
-        #     "question":  qa["question"],
-        #     "reference": qa["reference"],
-        #     "answer":    out["answer"],
-        #     "contexts":  out["contexts"],   # must be list[str]
-        # })
-        print(f"  [{i:02d}/50] {qa['question'][:60]}")
+        out = run_rag(retriever, llm, prompt, qa["question"])
+        results.append({
+            "question":  qa["question"],
+            "reference": qa["reference"],
+            "answer":    out["answer"],
+            "contexts":  out["contexts"],
+        })
+        print(f"  [{i:02d}/50] {qa['question'][:60]}...")
 
     return results
-
 
 # ── 6. Build RAGAS EvaluationDataset ────────────────────────────────────────
 def build_ragas_dataset(rag_results: list):
     """
     Convert a list of RAG result dicts into a RAGAS EvaluationDataset.
-
-    Each SingleTurnSample needs:
-      user_input         → the question
-      response           → the generated answer
-      retrieved_contexts → list[str] of retrieved passages
-      reference          → the ground-truth answer
     """
-    # TODO: build the dataset
-    # samples = [
-    #     SingleTurnSample(
-    #         user_input=r["question"],
-    #         response=r["answer"],
-    #         retrieved_contexts=r["contexts"],
-    #         reference=r["reference"],
-    #     )
-    #     for r in rag_results
-    # ]
-    # return EvaluationDataset(samples=samples)
-
-    pass  # remove this line when done
-
+    samples = [
+        SingleTurnSample(
+            user_input=r["question"],
+            response=r["answer"],
+            retrieved_contexts=r["contexts"],
+            reference=r["reference"],
+        )
+        for r in rag_results
+    ]
+    return EvaluationDataset(samples=samples)
 
 # ── 7. Run RAGAS evaluation ──────────────────────────────────────────────────
 def run_ragas_eval(rag_results: list, version: str) -> dict:
     """
     Evaluate RAG outputs with 4 RAGAS metrics.
-    Returns a dict: {metric_name: mean_score}
     """
     print(f"\n📐 Running RAGAS evaluation for prompt {version} ...")
+    dataset = build_ragas_dataset(rag_results)
 
-    # TODO: create the EvaluationDataset
-    # dataset = build_ragas_dataset(rag_results)
+    llm_eval = ChatOpenAI(
+        model="gpt-4o-mini",
+        api_key=os.getenv("OPENAI_API_KEY", ""),
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    )
+    emb_eval = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        api_key=os.getenv("OPENAI_API_KEY", ""),
+        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    )
 
-    # TODO: create LLM and embeddings for RAGAS to use
-    # llm_eval = ChatOpenAI(...)
-    # emb_eval = OpenAIEmbeddings(...)
+    result = evaluate(
+        dataset,
+        metrics=[faithfulness, answer_relevancy, context_recall, context_precision],
+        llm=llm_eval,
+        embeddings=emb_eval,
+    )
 
-    # TODO: run evaluate() — this makes many LLM calls!
-    # result = evaluate(
-    #     dataset,
-    #     metrics=[faithfulness, answer_relevancy, context_recall, context_precision],
-    #     llm=llm_eval,
-    #     embeddings=emb_eval,
-    # )
+    scores = {}
+    for key in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
+        raw = result[key]
+        scores[key] = float(np.mean([v for v in raw if v is not None]))
 
-    # TODO: extract mean scores
-    # result[metric_name] → list of floats for 50 samples → take mean
-    # scores = {}
-    # for key in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
-    #     raw = result[key]           # list of floats
-    #     scores[key] = float(np.mean([v for v in raw if v is not None]))
-
-    # TODO: print and return scores
-    # for k, v in scores.items():
-    #     star = " ⭐" if k == "faithfulness" and v >= 0.8 else ""
-    #     print(f"  {k:30s}: {v:.4f}{star}")
-    # return scores
-
-    pass  # remove this line when done
-
+    for k, v in scores.items():
+        star = " ⭐" if k == "faithfulness" and v >= 0.8 else ""
+        print(f"  {k:30s}: {v:.4f}{star}")
+        
+    return scores
 
 # ── 8. Main ─────────────────────────────────────────────────────────────────
 def main():
@@ -297,41 +299,39 @@ def main():
     print("  Step 3: RAGAS Evaluation")
     print("=" * 60)
 
-    # TODO: build vectorstore
-    # vectorstore = build_vectorstore()
+    vectorstore = build_vectorstore()
 
-    # TODO: collect outputs for V1 and V2
-    # v1_results = collect_rag_outputs(vectorstore, "v1")
-    # v2_results = collect_rag_outputs(vectorstore, "v2")
+    # Collect results
+    v1_results = collect_rag_outputs(vectorstore, "v1")
+    v2_results = collect_rag_outputs(vectorstore, "v2")
 
-    # TODO: run RAGAS evaluation on both
-    # v1_scores = run_ragas_eval(v1_results, "v1")
-    # v2_scores = run_ragas_eval(v2_results, "v2")
+    # Evaluate
+    v1_scores = run_ragas_eval(v1_results, "v1")
+    v2_scores = run_ragas_eval(v2_results, "v2")
 
-    # TODO: print comparison table
-    # for metric in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
-    #     s1, s2 = v1_scores[metric], v2_scores[metric]
-    #     winner = "← V1" if s1 > s2 else "← V2"
-    #     print(f"  {metric:30s}: V1={s1:.4f}  V2={s2:.4f}  {winner}")
+    # Comparison Table
+    print("\n" + "=" * 60)
+    print(f"{'Metric':30s} | {'V1':8s} | {'V2':8s} | Winner")
+    print("-" * 60)
+    for metric in ["faithfulness", "answer_relevancy", "context_recall", "context_precision"]:
+        s1, s2 = v1_scores[metric], v2_scores[metric]
+        winner = "V1" if s1 > s2 else "V2"
+        print(f"{metric:30s} | {s1:.4f} | {s2:.4f} | {winner}")
 
-    # TODO: check faithfulness target
-    # best_faith = max(v1_scores["faithfulness"], v2_scores["faithfulness"])
-    # if best_faith >= 0.8:
-    #     print(f"✅ Target met: faithfulness = {best_faith:.4f}")
-    # else:
-    #     print(f"⚠️  Below target ({best_faith:.4f}). Try adjusting chunking or prompts.")
+    best_faith = max(v1_scores["faithfulness"], v2_scores["faithfulness"])
+    if best_faith >= 0.8:
+        print(f"\n✅ Target met: faithfulness = {best_faith:.4f}")
+    else:
+        print(f"\n⚠️  Below target ({best_faith:.4f}). Try adjusting chunking or prompts.")
 
-    # TODO: save JSON report to data/ragas_report.json
-    # report = {
-    #     "prompt_v1_scores": v1_scores,
-    #     "prompt_v2_scores": v2_scores,
-    #     "target_met": best_faith >= 0.8,
-    # }
-    # Path("data/ragas_report.json").write_text(json.dumps(report, indent=2))
-    # print("💾 Saved data/ragas_report.json")
-
-    pass  # remove this line when done
-
+    # Save Report
+    report = {
+        "prompt_v1_scores": v1_scores,
+        "prompt_v2_scores": v2_scores,
+        "target_met": best_faith >= 0.8,
+    }
+    Path("data/ragas_report.json").write_text(json.dumps(report, indent=2))
+    print(f"💾 Saved data/ragas_report.json")
 
 if __name__ == "__main__":
     main()
